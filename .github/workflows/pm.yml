@@ -13,7 +13,7 @@ on:
         description: "Storage"
         required: true
         type: choice
-        options: [SSM]
+        options: [PARAMETER STORE]
 
       parameter_key:
         description: "Parameter Key"
