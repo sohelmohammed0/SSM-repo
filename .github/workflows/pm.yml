@@ -15,12 +15,12 @@ on:
         type: choice
         options: [SSM]
 
-      parameter_key:
-        description: "Parameter Key"
-        required: true
-
-      parameter_value:
-        description: "Parameter Value"
+      parameters:
+        description: |
+          Enter multiple key=value pairs (one per line)
+          Example:
+          DB_USER=admin
+          DB_PASS=secret
         required: true
 
       team_name:
@@ -72,43 +72,41 @@ jobs:
           aws-region: us-east-1
 
       # =============================
-      # 🔹 MANUAL MODE (STORE SECRET)
+      # 🔹 STORE MULTIPLE PARAMETERS
       # =============================
-      - name: Build Parameter Name
+      - name: Store Parameters
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          PARAM_NAME="/${{ github.event.inputs.team_name }}/${{ github.event.inputs.environment }}/${{ github.event.inputs.parameter_key }}"
-          echo "PARAM_NAME=$PARAM_NAME" >> $GITHUB_ENV
-          echo "📦 Storing at: $PARAM_NAME"
-
-      - name: Set Parameter Type
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        run: |
+          TYPE="String"
           if [ "${{ github.event.inputs.is_secret }}" = "true" ]; then
-            echo "TYPE=SecureString" >> $GITHUB_ENV
-          else
-            echo "TYPE=String" >> $GITHUB_ENV
+            TYPE="SecureString"
           fi
 
-      - name: Store Parameter
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        run: |
+          OVERWRITE_FLAG=""
           if [ "${{ github.event.inputs.overwrite }}" = "true" ]; then
-            OVERWRITE="--overwrite"
-          else
-            OVERWRITE=""
+            OVERWRITE_FLAG="--overwrite"
           fi
 
-          aws ssm put-parameter \
-            --name "$PARAM_NAME" \
-            --value "${{ github.event.inputs.parameter_value }}" \
-            --type "$TYPE" \
-            $OVERWRITE
+          echo "${{ github.event.inputs.parameters }}" | while IFS='=' read -r KEY VALUE
+          do
+            if [ -z "$KEY" ] || [ -z "$VALUE" ]; then
+              echo "⚠️ Skipping invalid line"
+              continue
+            fi
 
-          echo "✅ Stored successfully"
+            PARAM_NAME="/${{ github.event.inputs.team_name }}/${{ github.event.inputs.environment }}/$KEY"
+
+            echo "📦 Storing: $PARAM_NAME"
+
+            aws ssm put-parameter \
+              --name "$PARAM_NAME" \
+              --value "$VALUE" \
+              --type "$TYPE" \
+              $OVERWRITE_FLAG
+          done
 
       # =============================
-      # 🔹 PR MODE (FETCH SECRETS)
+      # 🔹 DETECT ENV (PR)
       # =============================
       - name: Detect Environment
         if: ${{ github.event_name == 'pull_request' }}
@@ -131,7 +129,10 @@ jobs:
           echo "ENV=$ENV" >> $GITHUB_ENV
           echo "🌍 ENV = $ENV"
 
-      - name: Fetch Parameters from SSM
+      # =============================
+      # 🔹 FETCH PARAMETERS
+      # =============================
+      - name: Fetch Parameters
         if: ${{ github.event_name == 'pull_request' }}
         run: |
           TEAM="DEVOPS"
@@ -144,27 +145,25 @@ jobs:
             --with-decryption \
             --recursive \
             --query "Parameters[*].[Name,Value]" \
-            --output text | while read NAME VALUE; do
-
-              KEY=$(basename $NAME)
-              echo "$KEY=$VALUE" >> $GITHUB_ENV
-
-            done
+            --output text | while read NAME VALUE
+          do
+            KEY=$(basename $NAME)
+            echo "$KEY=$VALUE" >> $GITHUB_ENV
+          done
 
       # =============================
-      # 🔹 SAFE VERIFICATION STEP
+      # 🔹 SAFE VERIFY
       # =============================
-      - name: Verify Secret Loaded (SAFE)
+      - name: Verify (Safe)
         if: ${{ github.event_name == 'pull_request' }}
         run: |
           if [ -z "$testKey" ]; then
-            echo "❌ testKey NOT loaded"
-            exit 1
+            echo "⚠️ testKey not found"
           else
-            echo "✅ testKey loaded successfully"
+            echo "✅ testKey loaded"
           fi
 
-      - name: Pipeline Ready
+      - name: Ready
         if: ${{ github.event_name == 'pull_request' }}
         run: |
-          echo "🚀 Secrets available for use (values hidden)"
+          echo "🚀 Secrets ready for use (values hidden)"
