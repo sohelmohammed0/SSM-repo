@@ -7,13 +7,18 @@ on:
         description: "Environment"
         required: true
         type: choice
-        options: [feature, dev, test, prod]
+        options:
+          - feature
+          - dev
+          - test
+          - prod
 
       storage:
         description: "Storage"
         required: true
         type: choice
-        options: [SSM]
+        options:
+          - PARAMETER STORE
 
       parameter_key:
         description: "Parameter Key"
@@ -34,13 +39,13 @@ on:
         default: true
 
       overwrite:
-        description: "Overwrite if exists?"
+        description: "Should overwrite if already exists?"
         required: true
         type: boolean
         default: true
 
       export_env:
-        description: "Store in GitHub env?"
+        description: "Should store in env variables?"
         required: true
         type: boolean
         default: false
@@ -52,6 +57,7 @@ on:
       - prod
       - "feature/*"
 
+# 🔐 REQUIRED FOR OIDC
 permissions:
   id-token: write
   contents: read
@@ -64,7 +70,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 🔐 OIDC AUTH
+      # 🔐 OIDC AUTH (NO AWS KEYS)
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -87,7 +93,6 @@ jobs:
         run: |
           PARAM_NAME="/${{ github.event.inputs.team_name }}/${{ github.event.inputs.environment }}/${{ github.event.inputs.parameter_key }}"
           echo "PARAM_NAME=$PARAM_NAME" >> $GITHUB_ENV
-          echo "📦 Parameter path: $PARAM_NAME"
 
       - name: Set Parameter Type
         if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -98,24 +103,18 @@ jobs:
             echo "TYPE=String" >> $GITHUB_ENV
           fi
 
-      - name: Store or Update Parameter
+      - name: Store or Update Parameter in SSM
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          if [ "${{ github.event.inputs.overwrite }}" = "true" ]; then
-            OVERWRITE_FLAG="--overwrite"
-          else
-            OVERWRITE_FLAG=""
-          fi
+          echo "Storing parameter: $PARAM_NAME"
 
           aws ssm put-parameter \
             --name "$PARAM_NAME" \
             --value "${{ github.event.inputs.parameter_value }}" \
             --type "$TYPE" \
-            $OVERWRITE_FLAG
+            --overwrite
 
-          echo "✅ Stored successfully"
-
-      - name: Export to ENV (optional)
+      - name: Export to GitHub ENV (optional)
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.export_env == 'true' }}
         run: |
           echo "${{ github.event.inputs.parameter_key }}=${{ github.event.inputs.parameter_value }}" >> $GITHUB_ENV
@@ -123,7 +122,7 @@ jobs:
       # =============================
       # 🔹 PR MODE (FETCH SECRETS)
       # =============================
-      - name: Detect Environment
+      - name: Detect Environment from Branch
         if: ${{ github.event_name == 'pull_request' }}
         run: |
           BRANCH=${GITHUB_HEAD_REF}
@@ -142,15 +141,14 @@ jobs:
           fi
 
           echo "ENV=$ENV" >> $GITHUB_ENV
-          echo "🌍 Environment: $ENV"
 
-      - name: Fetch Parameters
+      - name: Fetch All Parameters from SSM
         if: ${{ github.event_name == 'pull_request' }}
         run: |
-          TEAM="DEVOPS"
+          TEAM="payments"   # 🔧 change if needed
           PATH="/$TEAM/$ENV/"
 
-          echo "📥 Fetching from: $PATH"
+          echo "Fetching parameters from: $PATH"
 
           aws ssm get-parameters-by-path \
             --path "$PATH" \
@@ -161,10 +159,9 @@ jobs:
 
               KEY=$(basename $NAME)
               echo "$KEY=$VALUE" >> $GITHUB_ENV
-
             done
 
-      - name: Confirm Load (safe)
+      - name: Use Secrets (Example)
         if: ${{ github.event_name == 'pull_request' }}
         run: |
-          echo "✅ Secrets loaded into environment (values hidden)"
+          echo "✅ Secrets loaded into environment"
