@@ -3,6 +3,12 @@ name: SSM Combined Pipeline (OIDC)
 on:
   workflow_dispatch:
     inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options: [store, fetch, both]
+
       environment:
         description: "Environment"
         required: true
@@ -10,38 +16,40 @@ on:
         options: [feature, dev, test, prod]
 
       storage:
-        description: "Storage"
+        description: "Storage backend"
         required: true
         type: choice
         options: [SSM]
 
+      team_name:
+        description: "Team Name (e.g. DEVOPS, BACKEND)"
+        required: true
+
+      # ── STORE-specific inputs ──────────────────────────────────────────────
       parameters:
         description: |
-          Enter multiple key=value pairs (one per line)
-          Example:
-          DB_USER=admin
-          DB_PASS=secret
-        required: true
-
-      team_name:
-        description: "Team Name"
-        required: true
+          [STORE] Key=Value pairs — one per line. Example:
+            DB_USER=admin
+            DB_PASS=secret
+            APP_PORT=8080
+        required: false
 
       is_secret:
-        description: "Is it a secret string?"
-        required: true
+        description: "[STORE] Store as SecureString?"
+        required: false
         type: boolean
         default: true
 
       overwrite:
-        description: "Overwrite if already exists?"
-        required: true
+        description: "[STORE] Overwrite if already exists?"
+        required: false
         type: boolean
         default: true
 
+      # ── FETCH-specific inputs ──────────────────────────────────────────────
       export_env:
-        description: "Store in GitHub env?"
-        required: true
+        description: "[FETCH] Export fetched params into GitHub env vars?"
+        required: false
         type: boolean
         default: false
 
@@ -61,21 +69,34 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ── Checkout ────────────────────────────────────────────────────────────
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 🔐 OIDC AUTH
+      # ── OIDC Auth ───────────────────────────────────────────────────────────
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
           aws-region: us-east-1
 
-      # =============================
-      # 🔹 STORE MULTIPLE PARAMETERS
-      # =============================
-      - name: Store Parameters
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+      # ========================================================================
+      # 🔹 STORE — manual dispatch with action = store | both
+      # ========================================================================
+      - name: Validate Store Inputs
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          (github.event.inputs.action == 'store' || github.event.inputs.action == 'both')
+        run: |
+          if [ -z "${{ github.event.inputs.parameters }}" ]; then
+            echo "❌ 'parameters' input is required when action is store or both."
+            exit 1
+          fi
+
+      - name: Store Multiple Parameters
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          (github.event.inputs.action == 'store' || github.event.inputs.action == 'both')
         run: |
           TYPE="String"
           if [ "${{ github.event.inputs.is_secret }}" = "true" ]; then
@@ -87,83 +108,165 @@ jobs:
             OVERWRITE_FLAG="--overwrite"
           fi
 
-          echo "${{ github.event.inputs.parameters }}" | while IFS='=' read -r KEY VALUE
-          do
-            if [ -z "$KEY" ] || [ -z "$VALUE" ]; then
-              echo "⚠️ Skipping invalid line"
+          SUCCESS=0
+          FAILED=0
+
+          # Read every non-blank line that contains exactly one '='
+          while IFS= read -r line || [ -n "$line" ]; do
+            # Strip leading/trailing whitespace
+            line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+            # Skip blank lines or comment lines
+            [[ -z "$line" || "$line" == \#* ]] && continue
+
+            # Must contain '='
+            if [[ "$line" != *=* ]]; then
+              echo "⚠️  Skipping invalid line (no '='): $line"
+              (( FAILED++ )) || true
+              continue
+            fi
+
+            KEY="${line%%=*}"      # everything before the first '='
+            VALUE="${line#*=}"     # everything after  the first '='
+
+            # Keys must be non-empty
+            if [ -z "$KEY" ]; then
+              echo "⚠️  Skipping line with empty key: $line"
+              (( FAILED++ )) || true
               continue
             fi
 
             PARAM_NAME="/${{ github.event.inputs.team_name }}/${{ github.event.inputs.environment }}/$KEY"
 
-            echo "📦 Storing: $PARAM_NAME"
+            echo "📦 Storing: $PARAM_NAME  (type=$TYPE)"
 
             aws ssm put-parameter \
-              --name "$PARAM_NAME" \
-              --value "$VALUE" \
-              --type "$TYPE" \
-              $OVERWRITE_FLAG
-          done
+              --name   "$PARAM_NAME" \
+              --value  "$VALUE" \
+              --type   "$TYPE" \
+              $OVERWRITE_FLAG \
+            && (( SUCCESS++ )) || (( FAILED++ )) || true
 
-      # =============================
-      # 🔹 DETECT ENV (PR)
-      # =============================
-      - name: Detect Environment
-        if: ${{ github.event_name == 'pull_request' }}
-        run: |
-          BRANCH=${GITHUB_HEAD_REF}
+          done <<< "${{ github.event.inputs.parameters }}"
 
-          if [[ "$BRANCH" == feature/* ]]; then
-            ENV="feature"
-          elif [[ "$BRANCH" == dev ]]; then
-            ENV="dev"
-          elif [[ "$BRANCH" == test ]]; then
-            ENV="test"
-          elif [[ "$BRANCH" == prod ]]; then
-            ENV="prod"
-          else
-            echo "❌ Unknown branch"
+          echo ""
+          echo "✅ Stored : $SUCCESS parameter(s)"
+          echo "❌ Failed : $FAILED parameter(s)"
+
+          if [ "$FAILED" -gt 0 ]; then
             exit 1
           fi
 
-          echo "ENV=$ENV" >> $GITHUB_ENV
-          echo "🌍 ENV = $ENV"
-
-      # =============================
-      # 🔹 FETCH PARAMETERS
-      # =============================
-      - name: Fetch Parameters
-        if: ${{ github.event_name == 'pull_request' }}
+      # ========================================================================
+      # 🔹 FETCH — manual dispatch with action = fetch | both
+      # ========================================================================
+      - name: Fetch Parameters (manual)
+        if: >
+          github.event_name == 'workflow_dispatch' &&
+          (github.event.inputs.action == 'fetch' || github.event.inputs.action == 'both')
         run: |
-          TEAM="DEVOPS"
-          PATH="/$TEAM/$ENV/"
+          SSM_PATH="/${{ github.event.inputs.team_name }}/${{ github.event.inputs.environment }}/"
+          echo "📥 Fetching from: $SSM_PATH"
 
-          echo "📥 Fetching from: $PATH"
-
-          aws ssm get-parameters-by-path \
-            --path "$PATH" \
+          PARAMS=$(aws ssm get-parameters-by-path \
+            --path "$SSM_PATH" \
             --with-decryption \
             --recursive \
             --query "Parameters[*].[Name,Value]" \
-            --output text | while read NAME VALUE
-          do
-            KEY=$(basename $NAME)
-            echo "$KEY=$VALUE" >> $GITHUB_ENV
-          done
+            --output text)
 
-      # =============================
-      # 🔹 SAFE VERIFY
-      # =============================
-      - name: Verify (Safe)
-        if: ${{ github.event_name == 'pull_request' }}
-        run: |
-          if [ -z "$testKey" ]; then
-            echo "⚠️ testKey not found"
-          else
-            echo "✅ testKey loaded"
+          if [ -z "$PARAMS" ]; then
+            echo "⚠️  No parameters found under $SSM_PATH"
+            exit 0
           fi
 
-      - name: Ready
-        if: ${{ github.event_name == 'pull_request' }}
+          COUNT=0
+          while IFS=$'\t' read -r NAME VALUE; do
+            KEY=$(basename "$NAME")
+            echo "🔑 Found key: $KEY"
+
+            if [ "${{ github.event.inputs.export_env }}" = "true" ]; then
+              echo "$KEY=$VALUE" >> "$GITHUB_ENV"
+            fi
+
+            (( COUNT++ )) || true
+          done <<< "$PARAMS"
+
+          echo ""
+          echo "📊 Total parameters fetched: $COUNT"
+
+      # ========================================================================
+      # 🔹 DETECT ENV — pull request trigger
+      # ========================================================================
+      - name: Detect Environment (PR)
+        if: github.event_name == 'pull_request'
         run: |
-          echo "🚀 Secrets ready for use (values hidden)"
+          BRANCH="${GITHUB_HEAD_REF}"
+          echo "🌿 Branch: $BRANCH"
+
+          if [[ "$BRANCH" == feature/* ]]; then
+            ENV="feature"
+          elif [[ "$BRANCH" == "dev" ]]; then
+            ENV="dev"
+          elif [[ "$BRANCH" == "test" ]]; then
+            ENV="test"
+          elif [[ "$BRANCH" == "prod" ]]; then
+            ENV="prod"
+          else
+            echo "❌ Unrecognised branch: $BRANCH"
+            exit 1
+          fi
+
+          echo "ENV=$ENV" >> "$GITHUB_ENV"
+          echo "🌍 Resolved ENV = $ENV"
+
+      # ========================================================================
+      # 🔹 FETCH PARAMETERS — pull request trigger (always exports to env)
+      # ========================================================================
+      - name: Fetch Parameters (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          # Team is fixed for PR-triggered runs; change if needed.
+          TEAM="DEVOPS"
+          SSM_PATH="/$TEAM/$ENV/"
+          echo "📥 Fetching from: $SSM_PATH"
+
+          PARAMS=$(aws ssm get-parameters-by-path \
+            --path "$SSM_PATH" \
+            --with-decryption \
+            --recursive \
+            --query "Parameters[*].[Name,Value]" \
+            --output text)
+
+          if [ -z "$PARAMS" ]; then
+            echo "⚠️  No parameters found under $SSM_PATH"
+            exit 0
+          fi
+
+          COUNT=0
+          while IFS=$'\t' read -r NAME VALUE; do
+            KEY=$(basename "$NAME")
+            echo "$KEY=$VALUE" >> "$GITHUB_ENV"
+            (( COUNT++ )) || true
+          done <<< "$PARAMS"
+
+          echo "📊 Total parameters fetched: $COUNT"
+
+      # ========================================================================
+      # 🔹 VERIFY — pull request trigger
+      # ========================================================================
+      - name: Verify Secrets (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          # Add any key names you want to spot-check here.
+          for KEY in testKey DB_USER APP_PORT; do
+            if [ -z "${!KEY}" ]; then
+              echo "⚠️  $KEY — not found in environment"
+            else
+              echo "✅  $KEY — loaded successfully"
+            fi
+          done
+
+      - name: Ready
+        if: github.event_name == 'pull_request'
+        run: echo "🚀 All secrets are loaded and ready (values hidden)"
