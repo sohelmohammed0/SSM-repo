@@ -18,7 +18,7 @@ on:
         required: true
         type: choice
         options:
-          - SSM
+          - PARAMETER STORE
 
       parameter_key:
         description: "Parameter Key"
