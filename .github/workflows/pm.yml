@@ -95,6 +95,13 @@ on:
       team_name:
         required: true
         type: string
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+      AWS_REGION:
+        required: true
+      ALLOWED_TEAM_NAME:
+        required: true
     outputs:
       param_list:
         value: ${{ jobs.fetch.outputs.param_list }}
@@ -131,8 +138,8 @@ jobs:
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
-          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
           audience: sts.amazonaws.com
 
       - name: Store Parameters
@@ -142,11 +149,12 @@ jobs:
           TEAM="${{ github.event.inputs.team_name }}"
           ENV="${{ github.event.inputs.environment }}"
           OVERWRITE="${{ github.event.inputs.overwrite }}"
+          ALLOWED_TEAM="${{ secrets.ALLOWED_TEAM_NAME }}"
 
-          # Validate team name — case-sensitive, only BillBox is allowed
-          if [ "$TEAM" != "BillBox" ]; then
-            echo "Invalid team name: '$TEAM'. Only 'BillBox' is permitted."
-            echo "   To add more teams, update the workflow inputs and this check."
+          # Validate team name against secret
+          if [ "$TEAM" != "$ALLOWED_TEAM" ]; then
+            echo "Invalid team name: '$TEAM'. Only '$ALLOWED_TEAM' is permitted."
+            echo "   To add more teams, update the ALLOWED_TEAM_NAME secret."
             exit 1
           fi
 
@@ -184,7 +192,6 @@ jobs:
             fi
 
             # ── Validate key name ────────────────────────────────
-            # Must start with a letter, only letters/numbers/underscores allowed
             if ! echo "$KEY" | grep -qE '^[a-zA-Z][a-zA-Z0-9_]*$'; then
               echo "ERROR: Invalid key '$KEY' (slot $SLOT) — must start with a letter and contain only letters, numbers, or underscores. Skipping."
               echo $(( $(cat "$FAILED_FILE") + 1 )) > "$FAILED_FILE"
@@ -267,8 +274,8 @@ jobs:
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
-          aws-region: us-east-1
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
           audience: sts.amazonaws.com
 
       - name: Fetch Parameters (Paginated + Secure)

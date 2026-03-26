@@ -133,7 +133,7 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
           aws-region: us-east-1
-          audience: sts.amazonaws.com  # ← ADDED
+          audience: sts.amazonaws.com
 
       - name: Store Parameters
         run: |
@@ -150,8 +150,12 @@ jobs:
             exit 1
           fi
 
+          # ── Helper: trim leading and trailing whitespace ──────────
+          trim() {
+            echo "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+          }
+
           # Pipe-delimited slots: KEY|VALUE|SECURE
-          # Empty slots (params 2-5 are optional) are skipped automatically
           ENTRIES=""
           ENTRIES+="${{ github.event.inputs.param1_key }}|${{ github.event.inputs.param1_value }}|${{ github.event.inputs.param1_secure }}\n"
           ENTRIES+="${{ github.event.inputs.param2_key }}|${{ github.event.inputs.param2_value }}|${{ github.event.inputs.param2_secure }}\n"
@@ -159,7 +163,6 @@ jobs:
           ENTRIES+="${{ github.event.inputs.param4_key }}|${{ github.event.inputs.param4_value }}|${{ github.event.inputs.param4_secure }}\n"
           ENTRIES+="${{ github.event.inputs.param5_key }}|${{ github.event.inputs.param5_value }}|${{ github.event.inputs.param5_secure }}\n"
 
-          # Use temp files for counters — subshell (pipe) can't write back to parent vars
           STORED_FILE=$(mktemp)
           SKIPPED_FILE=$(mktemp)
           FAILED_FILE=$(mktemp)
@@ -171,8 +174,20 @@ jobs:
           echo -e "$ENTRIES" | while IFS='|' read -r KEY VALUE SECURE; do
             (( SLOT++ )) || true
 
+            # ── Trim leading/trailing spaces from key and value ──
+            KEY=$(trim "$KEY")
+            VALUE=$(trim "$VALUE")
+
             # Skip empty slots
             if [[ -z "$KEY" || -z "$VALUE" ]]; then
+              continue
+            fi
+
+            # ── Validate key name ────────────────────────────────
+            # Must start with a letter, only letters/numbers/underscores allowed
+            if ! echo "$KEY" | grep -qE '^[a-zA-Z][a-zA-Z0-9_]*$'; then
+              echo "ERROR: Invalid key '$KEY' (slot $SLOT) — must start with a letter and contain only letters, numbers, or underscores. Skipping."
+              echo $(( $(cat "$FAILED_FILE") + 1 )) > "$FAILED_FILE"
               continue
             fi
 
@@ -254,7 +269,7 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
           aws-region: us-east-1
-          audience: sts.amazonaws.com  # ← ADDED
+          audience: sts.amazonaws.com
 
       - name: Fetch Parameters (Paginated + Secure)
         id: fetch
