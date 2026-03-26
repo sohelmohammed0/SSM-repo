@@ -155,12 +155,18 @@ jobs:
           SKIPPED=0
           FAILED=0
 
+          SLOT=0
           echo -e "$ENTRIES" | while IFS='|' read -r KEY VALUE SECURE; do
+            (( SLOT++ )) || true
 
             # Skip empty slots
             if [[ -z "$KEY" || -z "$VALUE" ]]; then
               continue
             fi
+
+            # Mask key and value from all subsequent log output
+            echo "::add-mask::$KEY"
+            echo "::add-mask::$VALUE"
 
             TYPE="String"
             [ "$SECURE" = "true" ] && TYPE="SecureString"
@@ -170,22 +176,23 @@ jobs:
             # Respect overwrite flag
             if aws ssm get-parameter --name "$SSM_PATH" >/dev/null 2>&1; then
               if [ "$OVERWRITE" != "true" ]; then
-                echo "⏭️  Skipping existing: $KEY"
+                echo "⏭️  Skipping existing param (slot $SLOT)"
                 (( SKIPPED++ )) || true
                 continue
               fi
             fi
 
+            # Suppress AWS CLI JSON response output entirely
             if aws ssm put-parameter \
               --name "$SSM_PATH" \
               --value "$VALUE" \
               --type "$TYPE" \
               --overwrite \
-              --no-cli-pager; then
-              echo "✅ Stored: $KEY  (path=$SSM_PATH, type=$TYPE)"
+              --no-cli-pager > /dev/null 2>&1; then
+              echo "✅ Stored param $SLOT (type=$TYPE)"
               (( STORED++ )) || true
             else
-              echo "❌ Failed:  $KEY"
+              echo "❌ Failed to store param $SLOT — check AWS permissions"
               (( FAILED++ )) || true
             fi
 
