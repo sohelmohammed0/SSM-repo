@@ -9,9 +9,10 @@ on:
         type: choice
         options: [feature, dev, test, prod]
       team_name:
-        description: "Team name (used as SSM path prefix)"
+        description: "Team name — only 'BillBox' is allowed"
         required: true
-        type: string
+        type: choice
+        options: [BillBox]
       overwrite:
         description: "Overwrite existing parameters?"
         type: boolean
@@ -141,6 +142,13 @@ jobs:
           TEAM="${{ github.event.inputs.team_name }}"
           ENV="${{ github.event.inputs.environment }}"
           OVERWRITE="${{ github.event.inputs.overwrite }}"
+
+          # Validate team name — case-sensitive, only BillBox is allowed
+          if [ "$TEAM" != "BillBox" ]; then
+            echo "❌ Invalid team name: '$TEAM'. Only 'BillBox' is permitted."
+            echo "   To add more teams, update the workflow inputs and this check."
+            exit 1
+          fi
 
           # Pipe-delimited slots: KEY|VALUE|SECURE
           # Empty slots (params 2-5 are optional) are skipped automatically
@@ -305,4 +313,3 @@ jobs:
 
       - name: Ready
         run: echo "✅ Parameters ready for use"
-        
