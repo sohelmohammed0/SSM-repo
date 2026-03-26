@@ -101,7 +101,7 @@ jobs:
             # ✅ Use SSM_PATH to avoid overwriting $PATH
             SSM_PATH="/$TEAM/$ENV/$KEY"
 
-            # Duplicate protection
+            # Skip if exists and overwrite is disabled
             if aws ssm get-parameter --name "$SSM_PATH" >/dev/null 2>&1; then
               if [ "$OVERWRITE" != "true" ]; then
                 echo "⏭️  Skipping existing: $KEY"
@@ -114,7 +114,6 @@ jobs:
               --value "$VALUE" \
               --type "$TYPE" \
               --overwrite \
-              --tags "Key=Team,Value=$TEAM" "Key=Environment,Value=$ENV" \
               --no-cli-pager
 
             echo "✅ Stored: $KEY (type=$TYPE)"

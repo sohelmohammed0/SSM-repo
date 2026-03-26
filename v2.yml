@@ -1,218 +1,167 @@
-name: AWS Parameter Store Pipeline (Production - Stable)
+name: SSM Combined Pipeline (OIDC)
 
 on:
   workflow_dispatch:
     inputs:
       environment:
+        description: "Environment"
         required: true
         type: choice
-        options: [feature, dev, test, prod]
+        options:
+          - feature
+          - dev
+          - test
+          - prod
+
+      storage:
+        description: "Storage"
+        required: true
+        type: choice
+        options:
+          - PARAMETER STORE
+
+      parameter_key:
+        description: "Parameter Key"
+        required: true
+
+      parameter_value:
+        description: "Parameter Value"
+        required: true
+
       team_name:
+        description: "Team Name"
         required: true
-      parameters_json:
-        description: "JSON array of {key,value,secure}"
+
+      is_secret:
+        description: "Is it a secret string?"
         required: true
-      overwrite:
         type: boolean
         default: true
 
-  workflow_call:
-    inputs:
-      environment:
+      overwrite:
+        description: "Should overwrite if already exists?"
         required: true
-        type: string
-      team_name:
-        required: true
-        type: string
-    outputs:
-      param_list:
-        value: ${{ jobs.fetch.outputs.param_list }}
+        type: boolean
+        default: true
 
+      export_env:
+        description: "Should store in env variables?"
+        required: true
+        type: boolean
+        default: false
+
+  pull_request:
+    branches:
+      - dev
+      - test
+      - prod
+      - "feature/*"
+
+# 🔐 REQUIRED FOR OIDC
 permissions:
   id-token: write
   contents: read
 
 jobs:
-
-  # =========================
-  # STORE PARAMETERS
-  # =========================
-  store:
-    if: github.event_name == 'workflow_dispatch'
+  ssm-job:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # ✅ Install AWS CLI v2 properly (replaces unreliable apt method)
-      - name: Install AWS CLI v2
-        run: |
-          if aws --version 2>/dev/null | grep -q "aws-cli/2"; then
-            echo "AWS CLI v2 already present."
-          else
-            echo "Installing AWS CLI v2..."
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
-            unzip -q /tmp/awscliv2.zip -d /tmp/
-            sudo /tmp/aws/install --update
-            rm -rf /tmp/awscliv2.zip /tmp/aws
-          fi
-          aws --version
-
-      - name: Configure AWS
+      # 🔐 OIDC AUTH (NO AWS KEYS)
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
           aws-region: us-east-1
 
-      - name: Store Parameters
+      # =============================
+      # 🔹 MANUAL MODE (STORE SECRET)
+      # =============================
+      - name: Validate Inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          set -e
-
-          TEAM="${{ github.event.inputs.team_name }}"
-          ENV="${{ github.event.inputs.environment }}"
-          OVERWRITE="${{ github.event.inputs.overwrite }}"
-          PARAMS='${{ github.event.inputs.parameters_json }}'
-
-          # Validate JSON input up front
-          if ! echo "$PARAMS" | jq empty 2>/dev/null; then
-            echo "❌ parameters_json is not valid JSON"
+          if [ -z "${{ github.event.inputs.parameter_key }}" ] || [ -z "${{ github.event.inputs.parameter_value }}" ]; then
+            echo "❌ Parameter key/value cannot be empty"
             exit 1
           fi
 
-          echo "$PARAMS" | jq -c '.[]' | while read -r param; do
-            KEY=$(echo "$param"   | jq -r '.key')
-            VALUE=$(echo "$param" | jq -r '.value')
-            SECURE=$(echo "$param" | jq -r '.secure // true')
-
-            # Validation
-            if [[ -z "$KEY" || -z "$VALUE" ]]; then
-              echo "⚠️  Skipping param with empty key or value"
-              continue
-            fi
-
-            if [[ ! "$KEY" =~ ^[A-Z0-9_]+$ ]]; then
-              echo "⚠️  Invalid key format (must be A-Z, 0-9, _): $KEY"
-              continue
-            fi
-
-            TYPE="String"
-            [ "$SECURE" = "true" ] && TYPE="SecureString"
-
-            # ✅ Use SSM_PATH to avoid overwriting $PATH
-            SSM_PATH="/$TEAM/$ENV/$KEY"
-
-            # Skip if exists and overwrite is disabled
-            if aws ssm get-parameter --name "$SSM_PATH" >/dev/null 2>&1; then
-              if [ "$OVERWRITE" != "true" ]; then
-                echo "⏭️  Skipping existing: $KEY"
-                continue
-              fi
-            fi
-
-            aws ssm put-parameter \
-              --name "$SSM_PATH" \
-              --value "$VALUE" \
-              --type "$TYPE" \
-              --overwrite \
-              --no-cli-pager
-
-            echo "✅ Stored: $KEY (type=$TYPE)"
-          done
-
-  # =========================
-  # FETCH PARAMETERS
-  # =========================
-  fetch:
-    if: github.event_name == 'workflow_call'
-    runs-on: ubuntu-latest
-
-    outputs:
-      param_list: ${{ steps.fetch.outputs.param_list }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # ✅ Install AWS CLI v2 properly
-      - name: Install AWS CLI v2
+      - name: Build Parameter Name
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          if aws --version 2>/dev/null | grep -q "aws-cli/2"; then
-            echo "AWS CLI v2 already present."
+          PARAM_NAME="/${{ github.event.inputs.team_name }}/${{ github.event.inputs.environment }}/${{ github.event.inputs.parameter_key }}"
+          echo "PARAM_NAME=$PARAM_NAME" >> $GITHUB_ENV
+
+      - name: Set Parameter Type
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [ "${{ github.event.inputs.is_secret }}" = "true" ]; then
+            echo "TYPE=SecureString" >> $GITHUB_ENV
           else
-            echo "Installing AWS CLI v2..."
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
-            unzip -q /tmp/awscliv2.zip -d /tmp/
-            sudo /tmp/aws/install --update
-            rm -rf /tmp/awscliv2.zip /tmp/aws
+            echo "TYPE=String" >> $GITHUB_ENV
           fi
-          aws --version
 
-      - name: Configure AWS
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
-          aws-region: us-east-1
-
-      - name: Fetch Parameters (Paginated + Secure)
-        id: fetch
+      - name: Store or Update Parameter in SSM
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          set -e
+          echo "Storing parameter: $PARAM_NAME"
 
-          TEAM="${{ inputs.team_name }}"
-          ENV="${{ inputs.environment }}"
+          aws ssm put-parameter \
+            --name "$PARAM_NAME" \
+            --value "${{ github.event.inputs.parameter_value }}" \
+            --type "$TYPE" \
+            --overwrite
 
-          # ✅ Use SSM_PATH to avoid overwriting $PATH
-          SSM_PATH="/$TEAM/$ENV/"
+      - name: Export to GitHub ENV (optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.export_env == 'true' }}
+        run: |
+          echo "${{ github.event.inputs.parameter_key }}=${{ github.event.inputs.parameter_value }}" >> $GITHUB_ENV
 
-          echo "📥 Fetching from $SSM_PATH"
+      # =============================
+      # 🔹 PR MODE (FETCH SECRETS)
+      # =============================
+      - name: Detect Environment from Branch
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          BRANCH=${GITHUB_HEAD_REF}
 
-          NEXT_TOKEN=""
-          # ✅ Use a temp file to collect PARAM_LIST — fixes subshell scope bug
-          PARAM_LIST_FILE=$(mktemp)
+          if [[ "$BRANCH" == feature/* ]]; then
+            ENV="feature"
+          elif [[ "$BRANCH" == dev ]]; then
+            ENV="dev"
+          elif [[ "$BRANCH" == test ]]; then
+            ENV="test"
+          elif [[ "$BRANCH" == prod ]]; then
+            ENV="prod"
+          else
+            echo "❌ Unknown branch: $BRANCH"
+            exit 1
+          fi
 
-          while : ; do
-            if [ -z "$NEXT_TOKEN" ]; then
-              RESPONSE=$(aws ssm get-parameters-by-path \
-                --path "$SSM_PATH" \
-                --with-decryption \
-                --recursive \
-                --output json \
-                --no-cli-pager)
-            else
-              RESPONSE=$(aws ssm get-parameters-by-path \
-                --path "$SSM_PATH" \
-                --with-decryption \
-                --recursive \
-                --starting-token "$NEXT_TOKEN" \
-                --output json \
-                --no-cli-pager)
-            fi
+          echo "ENV=$ENV" >> $GITHUB_ENV
 
-            # Process each parameter
-            while read -r param; do
-              NAME=$(echo "$param"  | jq -r '.Name')
-              VALUE=$(echo "$param" | jq -r '.Value')
-              KEY=$(basename "$NAME")
+      - name: Fetch All Parameters from SSM
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          TEAM="payments"   # 🔧 change if needed
+          PATH="/$TEAM/$ENV/"
 
-              # Mask sensitive values in logs
-              echo "::add-mask::$VALUE"
+          echo "Fetching parameters from: $PATH"
 
-              # Export to env and track key
-              echo "$KEY=$VALUE" >> "$GITHUB_ENV"
-              echo "$KEY" >> "$PARAM_LIST_FILE"
+          aws ssm get-parameters-by-path \
+            --path "$PATH" \
+            --with-decryption \
+            --recursive \
+            --query "Parameters[*].[Name,Value]" \
+            --output text | while read NAME VALUE; do
 
-              echo "🔑 Loaded: $KEY"
-            done < <(echo "$RESPONSE" | jq -c '.Parameters[]')
+              KEY=$(basename $NAME)
+              echo "$KEY=$VALUE" >> $GITHUB_ENV
+            done
 
-            NEXT_TOKEN=$(echo "$RESPONSE" | jq -r '.NextToken // empty')
-            [ -z "$NEXT_TOKEN" ] && break
-          done
-
-          # ✅ Read PARAM_LIST outside subshell — no scope issue
-          PARAM_LIST=$(paste -sd ' ' "$PARAM_LIST_FILE")
-          rm -f "$PARAM_LIST_FILE"
-
-          echo "param_list=$PARAM_LIST" >> "$GITHUB_OUTPUT"
-          echo "📊 Total: $(echo "$PARAM_LIST" | wc -w) params loaded"
-
-      - name: Ready
-        run: echo "✅ Parameters ready for use"
+      - name: Use Secrets (Example)
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          echo "✅ Secrets loaded into environment"
