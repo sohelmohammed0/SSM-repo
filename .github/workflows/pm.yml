@@ -9,10 +9,9 @@ on:
         type: choice
         options: [feature, dev, test, prod]
       team_name:
-        description: "Team name — only 'BillBox' is allowed"
+        description: "Team name"
         required: true
-        type: choice
-        options: [BillBox]
+        type: string
       overwrite:
         description: "Overwrite existing parameters?"
         type: boolean
