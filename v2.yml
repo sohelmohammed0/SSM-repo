@@ -101,45 +101,22 @@ jobs:
             # ✅ Use SSM_PATH to avoid overwriting $PATH
             SSM_PATH="/$TEAM/$ENV/$KEY"
 
-            # Check if parameter already exists
-            EXISTS=false
-            if aws ssm get-parameter --name "$SSM_PATH" >/dev/null 2>&1; then
-              EXISTS=true
-            fi
-
             # Skip if exists and overwrite is disabled
-            if [ "$EXISTS" = "true" ] && [ "$OVERWRITE" != "true" ]; then
-              echo "⏭️  Skipping existing: $KEY"
-              continue
+            if aws ssm get-parameter --name "$SSM_PATH" >/dev/null 2>&1; then
+              if [ "$OVERWRITE" != "true" ]; then
+                echo "⏭️  Skipping existing: $KEY"
+                continue
+              fi
             fi
 
-            # ✅ AWS does not allow --tags and --overwrite together.
-            # New params  → put-parameter WITHOUT --overwrite, WITH --tags (create path)
-            # Existing params → put-parameter WITH --overwrite, WITHOUT --tags, then add-tags-to-resource separately
-            if [ "$EXISTS" = "false" ]; then
-              aws ssm put-parameter \
-                --name "$SSM_PATH" \
-                --value "$VALUE" \
-                --type "$TYPE" \
-                --tags "Key=Team,Value=$TEAM" "Key=Environment,Value=$ENV" \
-                --no-cli-pager
-            else
-              aws ssm put-parameter \
-                --name "$SSM_PATH" \
-                --value "$VALUE" \
-                --type "$TYPE" \
-                --overwrite \
-                --no-cli-pager
+            aws ssm put-parameter \
+              --name "$SSM_PATH" \
+              --value "$VALUE" \
+              --type "$TYPE" \
+              --overwrite \
+              --no-cli-pager
 
-              # Tag separately on update (add-tags-to-resource is idempotent)
-              aws ssm add-tags-to-resource \
-                --resource-type "Parameter" \
-                --resource-id "$SSM_PATH" \
-                --tags "Key=Team,Value=$TEAM" "Key=Environment,Value=$ENV" \
-                --no-cli-pager
-            fi
-
-            echo "✅ Stored: $KEY (type=$TYPE, existed=$EXISTS)"
+            echo "✅ Stored: $KEY (type=$TYPE)"
           done
 
   # =========================
