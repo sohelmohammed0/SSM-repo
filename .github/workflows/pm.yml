@@ -1,4 +1,4 @@
-name: AWS Parameter Store Pipeline (Production)
+name: AWS Parameter Store Pipeline (Production - Stable)
 
 on:
   workflow_dispatch:
@@ -33,6 +33,10 @@ permissions:
   contents: read
 
 jobs:
+
+  # =========================
+  # STORE PARAMETERS
+  # =========================
   store:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -40,23 +44,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ✅ Install AWS CLI explicitly (production-safe)
-      - name: Ensure AWS CLI v2
+      # ✅ Safe AWS CLI check (NO forced install)
+      - name: Ensure AWS CLI
         run: |
-          if command -v aws >/dev/null 2>&1; then
-            echo "AWS CLI already installed. Updating..."
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            sudo ./aws/install --update
-          else
+          if ! command -v aws >/dev/null 2>&1; then
             echo "Installing AWS CLI..."
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            sudo ./aws/install
+            sudo apt-get update
+            sudo apt-get install -y awscli
           fi
-
-      - name: Verify AWS CLI
-        run: aws --version
+          aws --version
 
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
@@ -64,7 +60,7 @@ jobs:
           role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
           aws-region: us-east-1
 
-      - name: Store Parameters (Dynamic + Safe)
+      - name: Store Parameters (Robust)
         run: |
           set -e
 
@@ -79,33 +75,30 @@ jobs:
             VALUE=$(echo "$param" | jq -r '.value')
             SECURE=$(echo "$param" | jq -r '.secure // true')
 
-            # ✅ Validation
+            # Validation
             if [[ -z "$KEY" || -z "$VALUE" ]]; then
-              echo "⚠️ Skipping invalid param (missing key/value)"
+              echo "⚠️ Skipping invalid param"
               continue
             fi
 
             if [[ ! "$KEY" =~ ^[A-Z0-9_]+$ ]]; then
-              echo "⚠️ Invalid key format: $KEY (use A-Z, 0-9, _)"
+              echo "⚠️ Invalid key format: $KEY"
               continue
             fi
 
             TYPE="String"
-            if [ "$SECURE" = "true" ]; then
-              TYPE="SecureString"
-            fi
+            [ "$SECURE" = "true" ] && TYPE="SecureString"
 
             PATH="/$TEAM/$ENV/$KEY"
 
-            # ✅ Duplicate protection
-            EXISTS=$(aws ssm get-parameter --name "$PATH" 2>/dev/null || true)
-
-            if [ -n "$EXISTS" ] && [ "$OVERWRITE" != "true" ]; then
-              echo "⏭️ Duplicate skipped: $KEY"
-              continue
+            # Duplicate protection
+            if aws ssm get-parameter --name "$PATH" >/dev/null 2>&1; then
+              if [ "$OVERWRITE" != "true" ]; then
+                echo "⏭️ Skipping existing: $KEY"
+                continue
+              fi
             fi
 
-            # ✅ Store parameter
             aws ssm put-parameter \
               --name "$PATH" \
               --value "$VALUE" \
@@ -117,6 +110,9 @@ jobs:
             echo "✅ Stored: $KEY"
           done
 
+  # =========================
+  # FETCH PARAMETERS
+  # =========================
   fetch:
     if: github.event_name == 'workflow_call'
     runs-on: ubuntu-latest
@@ -127,23 +123,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ✅ Install AWS CLI explicitly
-      - name: Ensure AWS CLI v2
+      # ✅ Safe AWS CLI check
+      - name: Ensure AWS CLI
         run: |
-          if command -v aws >/dev/null 2>&1; then
-            echo "AWS CLI already installed. Updating..."
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            sudo ./aws/install --update
-          else
+          if ! command -v aws >/dev/null 2>&1; then
             echo "Installing AWS CLI..."
-            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-            unzip -q awscliv2.zip
-            sudo ./aws/install
+            sudo apt-get update
+            sudo apt-get install -y awscli
           fi
-
-      - name: Verify AWS CLI
-        run: aws --version
+          aws --version
 
       - name: Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
@@ -151,7 +139,7 @@ jobs:
           role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
           aws-region: us-east-1
 
-      - name: Fetch Parameters with Pagination
+      - name: Fetch Parameters (Paginated + Secure)
         id: fetch
         run: |
           set -e
@@ -163,9 +151,10 @@ jobs:
           NEXT_TOKEN=""
           PARAM_LIST=""
 
-          echo "📥 Fetching parameters from $PATH"
+          echo "📥 Fetching from $PATH"
 
           while : ; do
+
             if [ -z "$NEXT_TOKEN" ]; then
               RESPONSE=$(aws ssm get-parameters-by-path \
                 --path "$PATH" \
@@ -186,10 +175,9 @@ jobs:
               VALUE=$(echo "$param" | jq -r '.Value')
               KEY=$(basename "$NAME")
 
-              # ✅ Mask values in logs
+              # Mask sensitive values
               echo "::add-mask::$VALUE"
 
-              # Inject into environment
               echo "$KEY=$VALUE" >> $GITHUB_ENV
               PARAM_LIST="$PARAM_LIST$KEY "
 
@@ -197,15 +185,14 @@ jobs:
             done
 
             NEXT_TOKEN=$(echo "$RESPONSE" | jq -r '.NextToken // empty')
-
             [ -z "$NEXT_TOKEN" ] && break
+
           done
 
           PARAM_LIST="${PARAM_LIST% }"
           echo "param_list=$PARAM_LIST" >> $GITHUB_OUTPUT
 
-          echo "\n📊 Total keys loaded: $(echo $PARAM_LIST | wc -w)"
+          echo "📊 Total: $(echo $PARAM_LIST | wc -w) params"
 
-      - name: Confirm Ready
-        run: |
-          echo "✅ All parameters injected securely into environment."
+      - name: Ready
+        run: echo "✅ Parameters ready for use"
