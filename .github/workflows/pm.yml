@@ -151,9 +151,13 @@ jobs:
           ENTRIES+="${{ github.event.inputs.param4_key }}|${{ github.event.inputs.param4_value }}|${{ github.event.inputs.param4_secure }}\n"
           ENTRIES+="${{ github.event.inputs.param5_key }}|${{ github.event.inputs.param5_value }}|${{ github.event.inputs.param5_secure }}\n"
 
-          STORED=0
-          SKIPPED=0
-          FAILED=0
+          # Use temp files for counters — subshell (pipe) can't write back to parent vars
+          STORED_FILE=$(mktemp)
+          SKIPPED_FILE=$(mktemp)
+          FAILED_FILE=$(mktemp)
+          echo 0 > "$STORED_FILE"
+          echo 0 > "$SKIPPED_FILE"
+          echo 0 > "$FAILED_FILE"
 
           SLOT=0
           echo -e "$ENTRIES" | while IFS='|' read -r KEY VALUE SECURE; do
@@ -177,7 +181,7 @@ jobs:
             if aws ssm get-parameter --name "$SSM_PATH" >/dev/null 2>&1; then
               if [ "$OVERWRITE" != "true" ]; then
                 echo "⏭️  Skipping existing param (slot $SLOT)"
-                (( SKIPPED++ )) || true
+                echo $(( $(cat "$SKIPPED_FILE") + 1 )) > "$SKIPPED_FILE"
                 continue
               fi
             fi
@@ -190,13 +194,19 @@ jobs:
               --overwrite \
               --no-cli-pager > /dev/null 2>&1; then
               echo "✅ Stored param $SLOT (type=$TYPE)"
-              (( STORED++ )) || true
+              echo $(( $(cat "$STORED_FILE") + 1 )) > "$STORED_FILE"
             else
               echo "❌ Failed to store param $SLOT — check AWS permissions"
-              (( FAILED++ )) || true
+              echo $(( $(cat "$FAILED_FILE") + 1 )) > "$FAILED_FILE"
             fi
 
           done
+
+          # Read final counts from temp files
+          STORED=$(cat "$STORED_FILE")
+          SKIPPED=$(cat "$SKIPPED_FILE")
+          FAILED=$(cat "$FAILED_FILE")
+          rm -f "$STORED_FILE" "$SKIPPED_FILE" "$FAILED_FILE"
 
           echo ""
           echo "──────────────────────────────"
