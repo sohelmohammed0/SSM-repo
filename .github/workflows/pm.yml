@@ -44,13 +44,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ✅ Safe AWS CLI check (NO forced install)
-      - name: Ensure AWS CLI
+      # ✅ Install AWS CLI v2 properly (replaces unreliable apt method)
+      - name: Install AWS CLI v2
         run: |
-          if ! command -v aws >/dev/null 2>&1; then
-            echo "Installing AWS CLI..."
-            sudo apt-get update
-            sudo apt-get install -y awscli
+          if aws --version 2>/dev/null | grep -q "aws-cli/2"; then
+            echo "AWS CLI v2 already present."
+          else
+            echo "Installing AWS CLI v2..."
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp/
+            sudo /tmp/aws/install --update
+            rm -rf /tmp/awscliv2.zip /tmp/aws
           fi
           aws --version
 
@@ -60,54 +64,60 @@ jobs:
           role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
           aws-region: us-east-1
 
-      - name: Store Parameters (Robust)
+      - name: Store Parameters
         run: |
           set -e
 
           TEAM="${{ github.event.inputs.team_name }}"
           ENV="${{ github.event.inputs.environment }}"
           OVERWRITE="${{ github.event.inputs.overwrite }}"
-
           PARAMS='${{ github.event.inputs.parameters_json }}'
 
+          # Validate JSON input up front
+          if ! echo "$PARAMS" | jq empty 2>/dev/null; then
+            echo "❌ parameters_json is not valid JSON"
+            exit 1
+          fi
+
           echo "$PARAMS" | jq -c '.[]' | while read -r param; do
-            KEY=$(echo "$param" | jq -r '.key')
+            KEY=$(echo "$param"   | jq -r '.key')
             VALUE=$(echo "$param" | jq -r '.value')
             SECURE=$(echo "$param" | jq -r '.secure // true')
 
             # Validation
             if [[ -z "$KEY" || -z "$VALUE" ]]; then
-              echo "⚠️ Skipping invalid param"
+              echo "⚠️  Skipping param with empty key or value"
               continue
             fi
 
             if [[ ! "$KEY" =~ ^[A-Z0-9_]+$ ]]; then
-              echo "⚠️ Invalid key format: $KEY"
+              echo "⚠️  Invalid key format (must be A-Z, 0-9, _): $KEY"
               continue
             fi
 
             TYPE="String"
             [ "$SECURE" = "true" ] && TYPE="SecureString"
 
-            PATH="/$TEAM/$ENV/$KEY"
+            # ✅ Use SSM_PATH to avoid overwriting $PATH
+            SSM_PATH="/$TEAM/$ENV/$KEY"
 
             # Duplicate protection
-            if aws ssm get-parameter --name "$PATH" >/dev/null 2>&1; then
+            if aws ssm get-parameter --name "$SSM_PATH" >/dev/null 2>&1; then
               if [ "$OVERWRITE" != "true" ]; then
-                echo "⏭️ Skipping existing: $KEY"
+                echo "⏭️  Skipping existing: $KEY"
                 continue
               fi
             fi
 
             aws ssm put-parameter \
-              --name "$PATH" \
+              --name "$SSM_PATH" \
               --value "$VALUE" \
               --type "$TYPE" \
-              ${OVERWRITE:+--overwrite} \
+              --overwrite \
               --tags "Key=Team,Value=$TEAM" "Key=Environment,Value=$ENV" \
               --no-cli-pager
 
-            echo "✅ Stored: $KEY"
+            echo "✅ Stored: $KEY (type=$TYPE)"
           done
 
   # =========================
@@ -123,13 +133,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ✅ Safe AWS CLI check
-      - name: Ensure AWS CLI
+      # ✅ Install AWS CLI v2 properly
+      - name: Install AWS CLI v2
         run: |
-          if ! command -v aws >/dev/null 2>&1; then
-            echo "Installing AWS CLI..."
-            sudo apt-get update
-            sudo apt-get install -y awscli
+          if aws --version 2>/dev/null | grep -q "aws-cli/2"; then
+            echo "AWS CLI v2 already present."
+          else
+            echo "Installing AWS CLI v2..."
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp/
+            sudo /tmp/aws/install --update
+            rm -rf /tmp/awscliv2.zip /tmp/aws
           fi
           aws --version
 
@@ -146,53 +160,60 @@ jobs:
 
           TEAM="${{ inputs.team_name }}"
           ENV="${{ inputs.environment }}"
-          PATH="/$TEAM/$ENV/"
+
+          # ✅ Use SSM_PATH to avoid overwriting $PATH
+          SSM_PATH="/$TEAM/$ENV/"
+
+          echo "📥 Fetching from $SSM_PATH"
 
           NEXT_TOKEN=""
-          PARAM_LIST=""
-
-          echo "📥 Fetching from $PATH"
+          # ✅ Use a temp file to collect PARAM_LIST — fixes subshell scope bug
+          PARAM_LIST_FILE=$(mktemp)
 
           while : ; do
-
             if [ -z "$NEXT_TOKEN" ]; then
               RESPONSE=$(aws ssm get-parameters-by-path \
-                --path "$PATH" \
+                --path "$SSM_PATH" \
                 --with-decryption \
                 --recursive \
-                --output json)
+                --output json \
+                --no-cli-pager)
             else
               RESPONSE=$(aws ssm get-parameters-by-path \
-                --path "$PATH" \
+                --path "$SSM_PATH" \
                 --with-decryption \
                 --recursive \
                 --starting-token "$NEXT_TOKEN" \
-                --output json)
+                --output json \
+                --no-cli-pager)
             fi
 
-            echo "$RESPONSE" | jq -c '.Parameters[]' | while read -r param; do
-              NAME=$(echo "$param" | jq -r '.Name')
+            # Process each parameter
+            while read -r param; do
+              NAME=$(echo "$param"  | jq -r '.Name')
               VALUE=$(echo "$param" | jq -r '.Value')
               KEY=$(basename "$NAME")
 
-              # Mask sensitive values
+              # Mask sensitive values in logs
               echo "::add-mask::$VALUE"
 
-              echo "$KEY=$VALUE" >> $GITHUB_ENV
-              PARAM_LIST="$PARAM_LIST$KEY "
+              # Export to env and track key
+              echo "$KEY=$VALUE" >> "$GITHUB_ENV"
+              echo "$KEY" >> "$PARAM_LIST_FILE"
 
               echo "🔑 Loaded: $KEY"
-            done
+            done < <(echo "$RESPONSE" | jq -c '.Parameters[]')
 
             NEXT_TOKEN=$(echo "$RESPONSE" | jq -r '.NextToken // empty')
             [ -z "$NEXT_TOKEN" ] && break
-
           done
 
-          PARAM_LIST="${PARAM_LIST% }"
-          echo "param_list=$PARAM_LIST" >> $GITHUB_OUTPUT
+          # ✅ Read PARAM_LIST outside subshell — no scope issue
+          PARAM_LIST=$(paste -sd ' ' "$PARAM_LIST_FILE")
+          rm -f "$PARAM_LIST_FILE"
 
-          echo "📊 Total: $(echo $PARAM_LIST | wc -w) params"
+          echo "param_list=$PARAM_LIST" >> "$GITHUB_OUTPUT"
+          echo "📊 Total: $(echo "$PARAM_LIST" | wc -w) params loaded"
 
       - name: Ready
         run: echo "✅ Parameters ready for use"
