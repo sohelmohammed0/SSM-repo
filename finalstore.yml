@@ -133,7 +133,6 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
           aws-region: us-east-1
-          audience: sts.amazonaws.com  # ← ADDED
 
       - name: Store Parameters
         run: |
@@ -145,7 +144,7 @@ jobs:
 
           # Validate team name — case-sensitive, only BillBox is allowed
           if [ "$TEAM" != "BillBox" ]; then
-            echo "Invalid team name: '$TEAM'. Only 'BillBox' is permitted."
+            echo "❌ Invalid team name: '$TEAM'. Only 'BillBox' is permitted."
             echo "   To add more teams, update the workflow inputs and this check."
             exit 1
           fi
@@ -188,7 +187,7 @@ jobs:
             # Respect overwrite flag
             if aws ssm get-parameter --name "$SSM_PATH" >/dev/null 2>&1; then
               if [ "$OVERWRITE" != "true" ]; then
-                echo "Skipping existing param (slot $SLOT)"
+                echo "⏭️  Skipping existing param (slot $SLOT)"
                 echo $(( $(cat "$SKIPPED_FILE") + 1 )) > "$SKIPPED_FILE"
                 continue
               fi
@@ -201,10 +200,10 @@ jobs:
               --type "$TYPE" \
               --overwrite \
               --no-cli-pager > /dev/null 2>&1; then
-              echo "Stored param $SLOT (type=$TYPE)"
+              echo "✅ Stored param $SLOT (type=$TYPE)"
               echo $(( $(cat "$STORED_FILE") + 1 )) > "$STORED_FILE"
             else
-              echo "Failed to store param $SLOT — check AWS permissions"
+              echo "❌ Failed to store param $SLOT — check AWS permissions"
               echo $(( $(cat "$FAILED_FILE") + 1 )) > "$FAILED_FILE"
             fi
 
@@ -218,9 +217,9 @@ jobs:
 
           echo ""
           echo "──────────────────────────────"
-          echo "Stored:  $STORED"
-          echo "Skipped: $SKIPPED"
-          echo "Failed:  $FAILED"
+          echo "✅ Stored:  $STORED"
+          echo "⏭️  Skipped: $SKIPPED"
+          echo "❌ Failed:  $FAILED"
           echo "──────────────────────────────"
 
   # =========================
@@ -254,7 +253,6 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
           aws-region: us-east-1
-          audience: sts.amazonaws.com  # ← ADDED
 
       - name: Fetch Parameters (Paginated + Secure)
         id: fetch
@@ -265,7 +263,7 @@ jobs:
           ENV="${{ inputs.environment }}"
           SSM_PATH="/$TEAM/$ENV/"
 
-          echo "Fetching from $SSM_PATH"
+          echo "📥 Fetching from $SSM_PATH"
 
           NEXT_TOKEN=""
           PARAM_LIST_FILE=$(mktemp)
@@ -299,7 +297,7 @@ jobs:
               echo "$KEY=$VALUE" >> "$GITHUB_ENV"
               echo "$KEY" >> "$PARAM_LIST_FILE"
 
-              echo "Loaded: $KEY"
+              echo "🔑 Loaded: $KEY"
             done < <(echo "$RESPONSE" | jq -c '.Parameters[]')
 
             NEXT_TOKEN=$(echo "$RESPONSE" | jq -r '.NextToken // empty')
@@ -310,7 +308,7 @@ jobs:
           rm -f "$PARAM_LIST_FILE"
 
           echo "param_list=$PARAM_LIST" >> "$GITHUB_OUTPUT"
-          echo "Total: $(echo "$PARAM_LIST" | wc -w) params loaded"
+          echo "📊 Total: $(echo "$PARAM_LIST" | wc -w) params loaded"
 
       - name: Ready
-        run: echo "Parameters ready for use"
+        run: echo "✅ Parameters ready for use"
