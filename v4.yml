@@ -1,0 +1,356 @@
+name: AWS Parameter Store Pipeline (OIDC)
+
+# ============================================================
+# USAGE:
+#   STORE  → Run this workflow manually (workflow_dispatch).
+#             Fill in Param 1..5 Key/Value fields and trigger.
+#
+#   FETCH  → Call this workflow from another pipeline using:
+#
+#             jobs:
+#               load-secrets:
+#                 uses: ./.github/workflows/ssm-combined-pipeline.yml
+#                 with:
+#                   environment: dev        # dev | test | prod | feature
+#                   team_name: DEVOPS
+#                 secrets: inherit
+#
+#             Then reference fetched values in the calling job:
+#               env:
+#                 MY_VAR: ${{ needs.load-secrets.outputs.param_list }}
+# ============================================================
+
+on:
+  # ── Manual trigger → STORE params ─────────────────────────
+  workflow_dispatch:
+    inputs:
+
+      environment:
+        description: "Environment"
+        required: true
+        type: choice
+        options: [feature, dev, test, prod]
+
+      team_name:
+        description: "Team Name (e.g. DEVOPS, BACKEND)"
+        required: true
+
+      overwrite:
+        description: "[STORE] Overwrite if already exists?"
+        required: true
+        type: boolean
+        default: true
+
+      # ── Param 1 (required) ──────────────────────────────────
+      param1_key:
+        description: "Param 1 – Key (e.g. APP_NAME)"
+        required: true
+
+      param1_value:
+        description: "Param 1 – Value"
+        required: true
+
+      param1_secret:
+        description: "Param 1 – SecureString? (KMS encrypted)"
+        required: false
+        type: boolean
+        default: true
+
+      # ── Param 2 (optional) ──────────────────────────────────
+      param2_key:
+        description: "Param 2 – Key (optional)"
+        required: false
+
+      param2_value:
+        description: "Param 2 – Value (optional)"
+        required: false
+
+      param2_secret:
+        description: "Param 2 – SecureString?"
+        required: false
+        type: boolean
+        default: true
+
+      # ── Param 3 (optional) ──────────────────────────────────
+      param3_key:
+        description: "Param 3 – Key (optional)"
+        required: false
+
+      param3_value:
+        description: "Param 3 – Value (optional)"
+        required: false
+
+      param3_secret:
+        description: "Param 3 – SecureString?"
+        required: false
+        type: boolean
+        default: true
+
+      # ── Param 4 (optional) ──────────────────────────────────
+      param4_key:
+        description: "Param 4 – Key (optional)"
+        required: false
+
+      param4_value:
+        description: "Param 4 – Value (optional)"
+        required: false
+
+      param4_secret:
+        description: "Param 4 – SecureString?"
+        required: false
+        type: boolean
+        default: true
+
+      # ── Param 5 (optional) ──────────────────────────────────
+      param5_key:
+        description: "Param 5 – Key (optional)"
+        required: false
+
+      param5_value:
+        description: "Param 5 – Value (optional)"
+        required: false
+
+      param5_secret:
+        description: "Param 5 – SecureString?"
+        required: false
+        type: boolean
+        default: true
+
+  # ── Called by another pipeline → FETCH params ─────────────
+  workflow_call:
+    inputs:
+      environment:
+        description: "Environment to fetch from (dev | test | prod | feature)"
+        required: true
+        type: string
+      team_name:
+        description: "Team name — must match the prefix used when storing"
+        required: true
+        type: string
+    outputs:
+      param_list:
+        description: "Space-separated list of fetched parameter key names"
+        value: ${{ jobs.fetch-parameters.outputs.param_list }}
+
+permissions:
+  id-token: write
+  contents: read
+
+# ==============================================================
+jobs:
+
+  # ============================================================
+  # JOB 1 – STORE  (workflow_dispatch only)
+  # ============================================================
+  store-parameters:
+    name: "📦 Store → AWS Parameter Store"
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
+          aws-region: us-east-1
+
+      - name: Store Parameters
+        run: |
+          TEAM="${{ github.event.inputs.team_name }}"
+          ENV="${{ github.event.inputs.environment }}"
+
+          OVERWRITE_FLAG=""
+          if [ "${{ github.event.inputs.overwrite }}" = "true" ]; then
+            OVERWRITE_FLAG="--overwrite"
+          fi
+
+          SUCCESS=0
+          SKIPPED=0
+          FAILED=0
+
+          # ── helper: store one key/value pair ────────────────
+          store_param() {
+            local IDX="$1"
+            local KEY="$2"
+            local VALUE="$3"
+            local IS_SECRET="$4"
+
+            # Skip params whose key was left blank (optional fields)
+            if [ -z "$KEY" ]; then
+              echo "⏭️  Param $IDX – skipped (no key provided)"
+              (( SKIPPED++ )) || true
+              return
+            fi
+
+            # Warn when a key is given but value is missing
+            if [ -z "$VALUE" ]; then
+              echo "⚠️  Param $IDX – key '$KEY' provided but value is empty, skipping"
+              (( SKIPPED++ )) || true
+              return
+            fi
+
+            local TYPE="String"
+            if [ "$IS_SECRET" = "true" ]; then
+              TYPE="SecureString"
+            fi
+
+            local PARAM_PATH="/$TEAM/$ENV/$KEY"
+            echo "📦 Storing Param $IDX: $PARAM_PATH  (type: $TYPE)"
+
+            if aws ssm put-parameter \
+                  --name   "$PARAM_PATH" \
+                  --value  "$VALUE" \
+                  --type   "$TYPE" \
+                  $OVERWRITE_FLAG \
+                  --no-cli-pager; then
+              echo "✅ Param $IDX stored: $PARAM_PATH"
+              (( SUCCESS++ )) || true
+            else
+              echo "❌ Param $IDX FAILED: $PARAM_PATH"
+              (( FAILED++ )) || true
+            fi
+
+            echo "---"
+          }
+
+          # ── Param 1 (required) ──────────────────────────────
+          store_param "1" \
+            "${{ github.event.inputs.param1_key }}" \
+            "${{ github.event.inputs.param1_value }}" \
+            "${{ github.event.inputs.param1_secret }}"
+
+          # ── Param 2 ─────────────────────────────────────────
+          store_param "2" \
+            "${{ github.event.inputs.param2_key }}" \
+            "${{ github.event.inputs.param2_value }}" \
+            "${{ github.event.inputs.param2_secret }}"
+
+          # ── Param 3 ─────────────────────────────────────────
+          store_param "3" \
+            "${{ github.event.inputs.param3_key }}" \
+            "${{ github.event.inputs.param3_value }}" \
+            "${{ github.event.inputs.param3_secret }}"
+
+          # ── Param 4 ─────────────────────────────────────────
+          store_param "4" \
+            "${{ github.event.inputs.param4_key }}" \
+            "${{ github.event.inputs.param4_value }}" \
+            "${{ github.event.inputs.param4_secret }}"
+
+          # ── Param 5 ─────────────────────────────────────────
+          store_param "5" \
+            "${{ github.event.inputs.param5_key }}" \
+            "${{ github.event.inputs.param5_value }}" \
+            "${{ github.event.inputs.param5_secret }}"
+
+          # ── Run summary ─────────────────────────────────────
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "  ✅  Stored  : $SUCCESS parameter(s)"
+          echo "  ⏭️   Skipped : $SKIPPED parameter(s)"
+          echo "  ❌  Failed  : $FAILED parameter(s)"
+          echo "════════════════════════════════════════"
+
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::error::$FAILED parameter(s) failed to store. Check the logs above."
+            exit 1
+          fi
+
+  # ============================================================
+  # JOB 2 – FETCH  (workflow_call only)
+  #
+  # How to call this from another workflow:
+  #
+  #   jobs:
+  #     load-secrets:
+  #       uses: ./.github/workflows/ssm-combined-pipeline.yml
+  #       with:
+  #         environment: dev
+  #         team_name: DEVOPS
+  #       secrets: inherit
+  #
+  #     use-secrets:
+  #       needs: load-secrets
+  #       runs-on: ubuntu-latest
+  #       steps:
+  #         - name: Use a fetched secret
+  #           run: echo "DB_USER is available as $DB_USER"
+  #           # All fetched params are auto-injected into $GITHUB_ENV
+  #           # so they are available as plain env vars in every step.
+  # ============================================================
+  fetch-parameters:
+    name: "📥 Fetch ← AWS Parameter Store"
+    if: github.event_name == 'workflow_call'
+    runs-on: ubuntu-latest
+
+    outputs:
+      param_list: ${{ steps.fetch.outputs.param_list }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::412128478995:role/TestForPMS
+          aws-region: us-east-1
+
+      - name: Fetch Latest Parameters
+        id: fetch
+        run: |
+          TEAM="${{ inputs.team_name }}"
+          ENV="${{ inputs.environment }}"
+          SSM_PATH="/$TEAM/$ENV/"
+
+          echo "📥 Fetching latest parameters from: $SSM_PATH"
+          echo ""
+
+          # Fetch all params under the path (decrypted)
+          PARAMS=$(aws ssm get-parameters-by-path \
+            --path "$SSM_PATH" \
+            --with-decryption \
+            --recursive \
+            --query "Parameters[*].[Name,Value]" \
+            --output text)
+
+          if [ -z "$PARAMS" ]; then
+            echo "⚠️  No parameters found under $SSM_PATH"
+            echo "param_list=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          COUNT=0
+          PARAM_LIST=""
+
+          while IFS=$'\t' read -r NAME VALUE; do
+            KEY=$(basename "$NAME")
+
+            # Inject into env so all downstream steps in this job
+            # (and any steps in the calling job via needs outputs)
+            # can use them as plain environment variables.
+            echo "$KEY=$VALUE" >> "$GITHUB_ENV"
+
+            PARAM_LIST="$PARAM_LIST$KEY "
+            echo "🔑 Loaded: $KEY"
+            (( COUNT++ )) || true
+          done <<< "$PARAMS"
+
+          # Trim trailing space
+          PARAM_LIST="${PARAM_LIST% }"
+
+          echo "param_list=$PARAM_LIST" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "  📊 Total parameters fetched: $COUNT"
+          echo "  📋 Keys: $PARAM_LIST"
+          echo "════════════════════════════════════════"
+
+      - name: Verify & Confirm Ready
+        run: |
+          echo "✅ All parameters injected into environment."
+          echo "🚀 Downstream steps can now use them as \$VAR_NAME directly."
