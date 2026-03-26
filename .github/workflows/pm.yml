@@ -19,7 +19,7 @@ on:
 
       # ── Parameter 1 (required) ────────────────────
       param1_key:
-        description: "Param 1 — Key (A-Z, 0-9, _ only)"
+        description: "Param 1 — Key"
         required: true
         type: string
       param1_value:
@@ -159,13 +159,6 @@ jobs:
 
             # Skip empty slots
             if [[ -z "$KEY" || -z "$VALUE" ]]; then
-              continue
-            fi
-
-            # Validate key format
-            if [[ ! "$KEY" =~ ^[A-Z0-9_]+$ ]]; then
-              echo "⚠️  Invalid key format (must be A-Z, 0-9, _): '$KEY' — skipping"
-              (( FAILED++ )) || true
               continue
             fi
 
